@@ -6,6 +6,7 @@ WORKDIR /app
 
 # Copy the requirements file and install dependencies
 COPY requirements.txt requirements.txt
+RUN pip config set global.index-url https://mirrors.cloud.tencent.com/pypi/simple
 RUN pip install -r requirements.txt
 
 # Copy the rest of your application code into the container

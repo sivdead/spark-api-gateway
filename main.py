@@ -12,12 +12,12 @@ import base64
 import requests
 
 load_dotenv()
-spark_model_versions = ['v1.1', 'v2.1', 'v3.1']
+spark_model_versions = ["v1.1", "v2.1", "v3.1"]
 
 servers = [
     {
         "url": "https://sparkai-gateway.vercel.app",
-        "description": "Spark AI Gateway - Staging"
+        "description": "Spark AI Gateway - Staging",
     },
 ]
 
@@ -51,8 +51,33 @@ class MessageContentImageItem(BaseModel):
 
 class Message(BaseModel):
     role: str
-    content: Union[str, List[Union[MessageContentTextItem,
-                                   MessageContentImageItem]]] = None
+    content: Union[
+        str, List[Union[MessageContentTextItem, MessageContentImageItem]]
+    ] = None
+
+
+class FunctionParameter(BaseModel):
+    type: str
+    properties: dict[str, "FunctionParameter"]
+    description: str
+    required: List[str]
+
+
+class FunctionCall(BaseModel):
+    arguments: str
+    name: str
+    """The name of the function to call."""
+
+
+class Function(BaseModel):
+    name: str
+    description: str
+    parameters: dict[str, object]
+
+
+class Tool(BaseModel):
+    type: str = "function"
+    function: Function
 
 
 class ChatCompletion(BaseModel):
@@ -60,34 +85,35 @@ class ChatCompletion(BaseModel):
     max_tokens: Optional[Union[int, None]] = 2048
     stream: Optional[bool] = False
     messages: List[Message] = []
-    model: Optional[str] = 'spark-api'
+    model: Optional[str] = "spark-api"
     n: Optional[int] = 1
-    version: Optional[Union[str, None]] = 'v1.1'
+    version: Optional[Union[str, None]] = "v1.1"
+    tools: Optional[List[Tool]] = None
 
-    @validator('max_tokens', pre=True, always=True)
+    @validator("max_tokens", pre=True, always=True)
     def set_max_tokens(cls, value):
         if value is None:
             return 2048
         return value
 
-    @validator('version', pre=True, always=True)
+    @validator("version", pre=True, always=True)
     def set_version(cls, value):
         if value is None:
-            return 'v1.1'
+            return "v1.1"
 
         if value not in spark_model_versions:
-            return 'v1.1'
+            return "v1.1"
 
         return value
 
 
 def get_domain(version):
     domain = None
-    if version == 'v1.1':
+    if version == "v1.1":
         domain = "general"
-    elif version == 'v2.1':
+    elif version == "v2.1":
         domain = "generalv2"
-    elif version == 'v3.1':
+    elif version == "v3.1":
         domain = "generalv3"
 
     return domain
@@ -98,15 +124,15 @@ def get_image_base64(url):
         response = requests.get(url)
         if response.status_code == 200:
             image_data = response.content
-            base64_data = base64.b64encode(image_data).decode('utf-8')
+            base64_data = base64.b64encode(image_data).decode("utf-8")
 
             return base64_data
         else:
-            print(
-                f"Failed to fetch image. Status code: {response.status_code}")
+            print(f"Failed to fetch image. Status code: {response.status_code}")
             raise Exception(f"Failed to fetch image: {url}")
     except Exception as e:
         raise e
+
 
 @app.post("/v1/chat/completions")
 def chat_completion(
@@ -119,15 +145,18 @@ def chat_completion(
                             Header(convert_underscores=False)] = None
 ):
     version = chatCompletion.version
+    if chatCompletion.model != "vision":
+        version = chatCompletion.model
+    chatCompletion.model = "spark-api"
     domain = get_domain(version)
 
     spark_client = None
 
-    if chatCompletion.model == 'vision':
+    if chatCompletion.model == "vision":
         spark_client = SparkImage(
             X_APP_ID or os.environ["APP_ID"],
             X_API_KEY or os.environ["API_KEY"],
-            X_API_SECRET or os.environ["API_SECRET"]
+            X_API_SECRET or os.environ["API_SECRET"],
         )
     else:
         spark_client = SparkChat(
@@ -135,7 +164,7 @@ def chat_completion(
             X_API_KEY or os.environ["API_KEY"],
             X_API_SECRET or os.environ["API_SECRET"],
             f"ws://spark-api.xf-yun.com/{version}/chat",
-            domain
+            domain,
         )
 
     message_list = []
@@ -146,30 +175,41 @@ def chat_completion(
             message_list.append({"role": role, "content": content})
         elif isinstance(content, List):
             for item in content:
-                if item.type == 'text':
-                    message_list.append({
-                        "role": role,
-                        "content": item.text
-                    })
-                elif item.type == 'image_url':
-                    message_list.append({
-                        "role": role,
-                        "content": get_image_base64(item.image_url.url),
-                        "content_type": "image"
-                    })
+                if item.type == "text":
+                    message_list.append({"role": role, "content": item.text})
+                elif item.type == "image_url":
+                    message_list.append(
+                        {
+                            "role": role,
+                            "content": get_image_base64(item.image_url.url),
+                            "content_type": "image",
+                        }
+                    )
+    functions = []
+    if chatCompletion.tools:
+        for tool in chatCompletion.tools:
+            functions.append(
+                {
+                    "name": tool.function.name,
+                    "description": tool.function.description,
+                    "parameters": tool.function.parameters,
+                }
+            )
 
-    print("stream: ",  chatCompletion.stream)
-    if (chatCompletion.stream):
-        return StreamingResponse(spark_client.chatCompletionStream(
-            message_list,
-            chatCompletion.temperature,
-            chatCompletion.max_tokens
-        ), media_type="text/event-stream")
+    print("stream: ", chatCompletion.stream)
+    if chatCompletion.stream:
+        return StreamingResponse(
+            spark_client.chatCompletionStream(
+                message_list, chatCompletion.temperature, chatCompletion.max_tokens
+            ),
+            media_type="text/event-stream",
+        )
     else:
         completion = spark_client.chatCompletion(
             message_list,
+            functions,
             chatCompletion.temperature,
-            chatCompletion.max_tokens
+            chatCompletion.max_tokens,
         )
         completion["version"] = version
         completion["domain"] = domain
